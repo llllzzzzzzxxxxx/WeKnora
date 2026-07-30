@@ -44,6 +44,7 @@ import DocumentBatchBar from './components/DocumentBatchBar.vue';
 import KbUploadSourceDropdown from './components/KbUploadSourceDropdown.vue';
 import TagEditDialog from './components/TagEditDialog.vue';
 import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
+import DocFolderBrowser from './components/DocFolderBrowser.vue';
 import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import { useUploadConfirmStore, type UploadConfirmResult } from '@/stores/uploadConfirm';
@@ -70,6 +71,15 @@ const kbLoading = ref(false);
 const docListLoading = ref(true);
 const isFAQ = computed(() => (kbInfo.value?.type || '') === 'faq');
 const isWiki = computed(() => !!kbInfo.value?.indexing_strategy?.wiki_enabled);
+const isDocumentType = computed(() => !isFAQ.value && !isWiki.value);
+const activeFolderId = ref<string | null>(null);
+
+// Handle folder selection from DocFolderBrowser
+const handleFolderSelect = (folderId: string | null) => {
+  activeFolderId.value = folderId;
+  // Reload documents when folder changes
+  loadKnowledgeFiles(kbId.value);
+};
 const validTabs = ['documents', 'wiki', 'graph'] as const
 type KbTab = typeof validTabs[number]
 const initTab = validTabs.includes(route.query.tab as any) ? (route.query.tab as KbTab) : 'documents'
@@ -568,7 +578,7 @@ const updatedTimeRange = ref<string[]>([]);
 const disableFutureDate = { after: new Date(new Date().setHours(23, 59, 59, 999)) };
 const filterParams = computed(() => {
   const [start, end] = updatedTimeRange.value || [];
-  return {
+  const params: Record<string, any> = {
     tag_ids: selectedTagIds.value.length > 0 ? selectedTagIds.value.join(',') : undefined,
     keyword: docSearchKeyword.value ? docSearchKeyword.value.trim() : undefined,
     file_type: selectedFileType.value || undefined,
@@ -577,6 +587,17 @@ const filterParams = computed(() => {
     start_time: start ? `${start} 00:00:00` : undefined,
     end_time: end ? `${end} 23:59:59` : undefined,
   };
+  // Add folder filtering for document KBs
+  if (!isFAQ.value && !isWiki.value) {
+    if (activeFolderId.value) {
+      params.folder_id = activeFolderId.value;
+      params.folder_scope = 'self';
+    } else {
+      params.folder_id = '';
+      params.folder_scope = 'root';
+    }
+  }
+  return params;
 });
 const tagMap = computed<Record<string, any>>(() => {
   const map: Record<string, any> = {};
@@ -2213,6 +2234,16 @@ async function createNewSession(value: string): Promise<void> {
 
       <template v-if="activeKbTab === 'documents' || !isWiki">
         <div class="knowledge-main">
+          <!-- Folder sidebar for document KBs (not FAQ) -->
+          <div v-if="!isFAQ && isDocumentType" class="doc-folder-sidebar">
+            <DocFolderBrowser
+              v-if="kbId"
+              :kb-id="kbId"
+              :can-edit="canEdit"
+              :selected-id="activeFolderId || undefined"
+              @select="handleFolderSelect"
+            />
+          </div>
           <div class="tag-content">
             <div class="doc-card-area">
               <div class="doc-filter-bar">
@@ -3089,6 +3120,14 @@ async function createNewSession(value: string): Promise<void> {
   border: none;
   overflow: hidden;
   background: transparent;
+}
+
+.doc-folder-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--td-border-level-1-color);
+  background-color: var(--td-bg-color-container);
+  overflow-y: auto;
 }
 
 .doc-card-area {

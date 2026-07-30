@@ -138,6 +138,20 @@ func applyKnowledgeListFilter(query *gorm.DB, filter types.KnowledgeListFilter) 
 	if !filter.UpdatedTo.IsZero() {
 		query = query.Where("updated_at <= ?", filter.UpdatedTo)
 	}
+	if filter.FolderID != nil {
+		// The pointer distinguishes "no folder filter" (nil) from "root
+		// folder only" (non-nil pointing at ""). For UI semantics this is
+		// the difference between "all documents in this KB" and "documents
+		// not stored in any folder".
+		if *filter.FolderID == "" {
+			query = query.Where("folder_id = ''")
+		} else if filter.FolderScope == types.FolderScopeTree {
+			query = query.Where("folder_id IN (SELECT id FROM knowledge_folders WHERE knowledge_base_id = knowledges.knowledge_base_id AND (id = ? OR path = ? OR path LIKE ?))",
+				*filter.FolderID, *filter.FolderID, *filter.FolderID+"/%")
+		} else {
+			query = query.Where("folder_id = ?", *filter.FolderID)
+		}
+	}
 	return query
 }
 
@@ -755,4 +769,96 @@ func (r *knowledgeRepository) ListIDsByTagIDs(
 		Distinct("knowledges.id").
 		Pluck("knowledges.id", &ids).Error
 	return ids, err
+}
+
+// ListKnowledgeIDsByFolderIDs returns the deduplicated IDs of knowledges
+// filed under any of the given folders within the KB. The (kb, folder_id)
+// index keeps the IN-clause cheap even for hundreds of folders; the caller
+// is responsible for joining the descendants in if "this folder and its
+// subtree" is what it wants.
+func (r *knowledgeRepository) ListKnowledgeIDsByFolderIDs(
+	ctx context.Context, tenantID uint64, kbID string, folderIDs []string,
+) ([]string, error) {
+	if len(folderIDs) == 0 {
+		return nil, nil
+	}
+	var ids []string
+	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND folder_id IN (?)",
+			tenantID, kbID, folderIDs).
+		Distinct("id").
+		Pluck("id", &ids).Error
+	return ids, err
+}
+
+// UpdateKnowledgeFolderID moves a single knowledge row into the given
+// folder. folderID == "" means "move to the KB root". The caller is
+// expected to have validated KB ownership / authorization before this
+// call — the repository only enforces tenant scope.
+func (r *knowledgeRepository) UpdateKnowledgeFolderID(
+	ctx context.Context, tenantID uint64, knowledgeID string, folderID string,
+) error {
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("tenant_id = ? AND id = ?", tenantID, knowledgeID).
+		Updates(map[string]interface{}{
+			"folder_id":  folderID,
+			"updated_at": time.Now(),
+		}).Error
+}
+
+// UpdateKnowledgeFolderIDBatch moves many knowledge rows into the same
+// folder in a single UPDATE so a 200-document move does not become 200
+// round-trips. The KB scope is part of the WHERE clause so a misbehaving
+// caller cannot promote a cross-KB move.
+func (r *knowledgeRepository) UpdateKnowledgeFolderIDBatch(
+	ctx context.Context, tenantID uint64, kbID string, knowledgeIDs []string, folderID string,
+) (int64, error) {
+	if len(knowledgeIDs) == 0 {
+		return 0, nil
+	}
+	result := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND id IN (?)",
+			tenantID, kbID, knowledgeIDs).
+		Updates(map[string]interface{}{
+			"folder_id":  folderID,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
+// CountDocumentsByFolder returns the live document count under each folder
+// in the KB (folder_id in folderIDs). Used by the directory tree to draw
+// the count badge without a second round-trip per folder.
+func (r *knowledgeRepository) CountDocumentsByFolder(
+	ctx context.Context, tenantID uint64, kbID string, folderIDs []string,
+) (map[string]int64, error) {
+	out := make(map[string]int64, len(folderIDs))
+	if len(folderIDs) == 0 {
+		return out, nil
+	}
+	type folderCount struct {
+		FolderID string
+		Cnt      int64
+	}
+	var rows []folderCount
+	if err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Select("folder_id, COUNT(*) as cnt").
+		Where("tenant_id = ? AND knowledge_base_id = ? AND folder_id IN (?)",
+			tenantID, kbID, folderIDs).
+		Group("folder_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.FolderID] = row.Cnt
+	}
+	for _, id := range folderIDs {
+		if _, ok := out[id]; !ok {
+			out[id] = 0
+		}
+	}
+	return out, nil
 }

@@ -104,7 +104,32 @@ type KnowledgeListFilter struct {
 	UpdatedFrom time.Time
 	// UpdatedTo, when non-zero, keeps rows with updated_at <= UpdatedTo.
 	UpdatedTo time.Time
+	// FolderID scopes the listing to a single directory. The empty string means
+	// "root" (documents with folder_id == ''); a missing pointer (nil) means
+	// "no filter". Distinguishing the two is necessary so the UI can render
+	// "documents at KB root" vs "all documents in this KB, regardless of folder".
+	FolderID *string
+	// FolderScope controls folder scoping semantics. The zero value
+	// (FolderScopeSelf) matches the FolderID folder and excludes descendant
+	// folders. FolderScopeTree matches the FolderID folder and every
+	// descendant folder; this is what the @folder mention uses to scope
+	// chat retrieval to a whole branch.
+	FolderScope FolderScope
 }
+
+// FolderScope enumerates folder filter semantics for ListPagedKnowledgeByKnowledgeBaseID.
+// It's a separate type (instead of a plain bool) so the API stays forward-compatible
+// when more granular scopes (e.g. "siblings only") are added.
+type FolderScope string
+
+const (
+	// FolderScopeSelf keeps documents filed directly under the FolderID folder
+	// (not its descendants). This is the default for the document list view.
+	FolderScopeSelf FolderScope = ""
+	// FolderScopeTree keeps documents filed under FolderID or any descendant
+	// folder. Used by chat retrieval when a user @-mentions a folder.
+	FolderScopeTree FolderScope = "tree"
+)
 
 // Knowledge represents a knowledge entity in the system.
 // It contains metadata about the knowledge source, its processing status,
@@ -156,6 +181,12 @@ type Knowledge struct {
 	Metadata JSON `json:"metadata"           gorm:"type:json"`
 	// Last FAQ import result (for FAQ type knowledge only)
 	LastFAQImportResult JSON `json:"last_faq_import_result" gorm:"type:json"`
+	// FolderID is the directory this document is filed under inside its
+	// knowledge base. The empty string denotes the KB root and matches
+	// documents that explicitly opt out of any folder. Maps to
+	// knowledge_folders.id; the folder row is kept alive independently so
+	// renaming / moving a folder does not have to touch every document.
+	FolderID string `json:"folder_id"        gorm:"type:varchar(36);index;default:''"`
 	// Creation time of the knowledge
 	CreatedAt time.Time `json:"created_at"`
 	// Last updated time of the knowledge
@@ -211,6 +242,7 @@ type ManualKnowledgePayload struct {
 	TagIDs        []string                   `json:"tag_ids"`
 	Channel       string                     `json:"channel"`
 	ProcessConfig *KnowledgeProcessOverrides `json:"process_config,omitempty"`
+	FolderID      string                     `json:"folder_id,omitempty"`
 }
 
 // KnowledgeSearchScope defines a (tenant_id, knowledge_base_id) scope for knowledge search (e.g. own KBs + shared KBs).

@@ -13,6 +13,7 @@ import (
 type KnowledgeService interface {
 	// CreateKnowledgeFromFile creates knowledge from a file.
 	// channel identifies the ingestion channel (e.g. "web", "api", "wechat"); empty defaults to "web".
+	// folderID targets an existing folder inside the KB; "" means "store at the KB root".
 	CreateKnowledgeFromFile(
 		ctx context.Context,
 		kbID string,
@@ -23,11 +24,13 @@ type KnowledgeService interface {
 		tagIDs []string,
 		channel string,
 		processOverrides *types.KnowledgeProcessOverrides,
+		folderID string,
 	) (*types.Knowledge, error)
 	// CreateKnowledgeFromURL creates knowledge from a URL.
 	// When fileName or fileType is provided (or the URL path has a known file extension),
 	// the URL is treated as a direct file download instead of a web page crawl.
 	// channel identifies the ingestion channel; empty defaults to "web".
+	// folderID targets an existing folder inside the KB; "" means "store at the KB root".
 	CreateKnowledgeFromURL(
 		ctx context.Context,
 		kbID string,
@@ -39,6 +42,7 @@ type KnowledgeService interface {
 		tagIDs []string,
 		channel string,
 		processOverrides *types.KnowledgeProcessOverrides,
+		folderID string,
 	) (*types.Knowledge, error)
 	// CreateKnowledgeFromPassage creates knowledge from text passages.
 	// channel identifies the ingestion channel; empty defaults to "web".
@@ -47,11 +51,13 @@ type KnowledgeService interface {
 	CreateKnowledgeFromPassageSync(ctx context.Context, kbID string, passage []string, channel string) (*types.Knowledge, error)
 	// CreateKnowledgeFromManual creates or saves manual Markdown knowledge content.
 	// channel identifies the ingestion channel; empty defaults to "web".
+	// folderID targets an existing folder inside the KB; "" means "store at the KB root".
 	CreateKnowledgeFromManual(
 		ctx context.Context,
 		kbID string,
 		payload *types.ManualKnowledgePayload,
 		channel string,
+		folderID string,
 	) (*types.Knowledge, error)
 	// GetKnowledgeByID retrieves knowledge by ID (uses tenant from context).
 	GetKnowledgeByID(ctx context.Context, id string) (*types.Knowledge, error)
@@ -188,6 +194,17 @@ type KnowledgeService interface {
 	GetKnowledgeMoveProgress(ctx context.Context, taskID string) (*types.KnowledgeMoveProgress, error)
 	// SaveKnowledgeMoveProgress saves the progress of a knowledge move task
 	SaveKnowledgeMoveProgress(ctx context.Context, progress *types.KnowledgeMoveProgress) error
+	// MoveKnowledgeToFolder relocates a set of documents into a folder inside
+	// the same KB. folderID == "" means "move to the KB root". The handler is
+	// expected to validate KB ownership first; the service still re-checks
+	// ownership as a defense-in-depth guard so a misconfigured middleware cannot
+	// promote a cross-KB move.
+	MoveKnowledgeToFolder(ctx context.Context, tenantID uint64, kbID string, knowledgeIDs []string, folderID string) ([]string, error)
+	// ResolveFolderKnowledgeIDs expands a folder mention into a deduplicated
+	// list of knowledge IDs that encompass the folder and every descendant.
+	// An empty folder returns an empty slice (no implicit "expand to KB" — the
+	// caller decides whether an empty slice should fall back to the whole KB).
+	ResolveFolderKnowledgeIDs(ctx context.Context, tenantID uint64, kbID string, folderScope *types.FolderScopeQuery) ([]string, error)
 	// GetFAQImportProgress retrieves the progress of an FAQ import task
 	GetFAQImportProgress(ctx context.Context, taskID string) (*types.FAQImportProgress, error)
 	// UpdateLastFAQImportResultDisplayStatus updates the display status of FAQ import result
@@ -271,4 +288,24 @@ type KnowledgeRepository interface {
 	GetKnowledgeTags(ctx context.Context, knowledgeIDs []string) (map[string][]*types.KnowledgeTag, error)
 	// DeleteKnowledgeTagRelations deletes all tag relations for a knowledge entry.
 	DeleteKnowledgeTagRelations(ctx context.Context, knowledgeID string) error
+	// ListKnowledgeIDsByFolderIDs returns the IDs of documents filed inside
+	// the given KB and any of the supplied folders. This is the leaf-resolution
+	// step used by the @folder mention path: chat retrieval needs a flat list
+	// of knowledge IDs that it can pass through the existing SearchTarget
+	// pipeline, and the GORM union (folder_id IN (?, ?, ...) OR folder_id IN
+	// (subselect of descendants)) keeps the query bounded by the index on
+	// (knowledge_base_id, folder_id).
+	ListKnowledgeIDsByFolderIDs(ctx context.Context, tenantID uint64, kbID string, folderIDs []string) ([]string, error)
+	// UpdateKnowledgeFolderID moves a single knowledge row into the given
+	// folder. folderID == "" means "move to the KB root". Used by the
+	// move-into-folder endpoint and the service-level helpers.
+	UpdateKnowledgeFolderID(ctx context.Context, tenantID uint64, knowledgeID string, folderID string) error
+	// UpdateKnowledgeFolderIDBatch moves many knowledge rows into the same
+	// folder in a single UPDATE. The implementation also re-stamps updated_at
+	// so the document list re-sorts consistently with the rest of the listing.
+	UpdateKnowledgeFolderIDBatch(ctx context.Context, tenantID uint64, kbID string, knowledgeIDs []string, folderID string) (int64, error)
+	// CountDocumentsByFolder returns the live document count under each
+	// folder in the KB (folder_id in folderIDs). Used for the live document
+	// count badge in the directory tree.
+	CountDocumentsByFolder(ctx context.Context, tenantID uint64, kbID string, folderIDs []string) (map[string]int64, error)
 }

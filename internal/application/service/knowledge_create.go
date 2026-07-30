@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -26,7 +28,7 @@ import (
 // CreateKnowledgeFromFile creates a knowledge entry from an uploaded file
 func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool, customFileName string, tagIDs []string, channel string,
-	processOverrides *types.KnowledgeProcessOverrides,
+	processOverrides *types.KnowledgeProcessOverrides, folderID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file")
 
@@ -184,9 +186,25 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 
 	// Prepare knowledge record
 	logger.Info(ctx, "Preparing knowledge record")
+	// Resolve target folder. The empty string is the KB root, which
+	// needs no validation; a non-empty id must point at an existing folder
+	// so a typo in the request cannot file a document into a phantom
+	// directory.
+	folderID = strings.TrimSpace(folderID)
+	if folderID != types.KnowledgeFolderRootID && s.folderRepo != nil {
+		if _, folderErr := s.folderRepo.GetFolderByID(ctx, kbID, folderID); folderErr != nil {
+			if errors.Is(folderErr, interfaces.ErrKnowledgeFolderNotFound) {
+				return nil, werrors.NewNotFoundError("knowledge folder not found")
+			}
+			return nil, folderErr
+		}
+	}
+
+
 	knowledge := &types.Knowledge{
 		ID:               uuid.New().String(),
 		TenantID:         tenantID,
+		FolderID:         folderID,
 		KnowledgeBaseID:  kbID,
 		Type:             "file",
 		Channel:          defaultChannel(channel),
@@ -313,7 +331,7 @@ func isFileURL(rawURL, fileName, fileType string) bool {
 
 func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	kbID string, rawURL string, fileName string, fileType string, enableMultimodel *bool, title string, tagIDs []string, channel string,
-	processOverrides *types.KnowledgeProcessOverrides,
+	processOverrides *types.KnowledgeProcessOverrides, folderID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from URL")
 	logger.Infof(ctx, "Knowledge base ID: %s, URL: %s", kbID, rawURL)
@@ -321,7 +339,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 	// Route to file_url logic when the URL points to a downloadable file
 	if isFileURL(rawURL, fileName, fileType) {
 		return s.createKnowledgeFromFileURL(
-			ctx, kbID, rawURL, fileName, fileType, enableMultimodel, title, tagIDs, channel, processOverrides,
+			ctx, kbID, rawURL, fileName, fileType, enableMultimodel, title, tagIDs, channel, processOverrides, folderID,
 		)
 	}
 
@@ -386,9 +404,25 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 
 	// Create knowledge record
 	logger.Info(ctx, "Creating knowledge record")
+	// Resolve target folder. The empty string is the KB root, which
+	// needs no validation; a non-empty id must point at an existing folder
+	// so a typo in the request cannot file a document into a phantom
+	// directory.
+	folderID = strings.TrimSpace(folderID)
+	if folderID != types.KnowledgeFolderRootID && s.folderRepo != nil {
+		if _, folderErr := s.folderRepo.GetFolderByID(ctx, kbID, folderID); folderErr != nil {
+			if errors.Is(folderErr, interfaces.ErrKnowledgeFolderNotFound) {
+				return nil, werrors.NewNotFoundError("knowledge folder not found")
+			}
+			return nil, folderErr
+		}
+	}
+
+
 	knowledge := &types.Knowledge{
 		ID:               uuid.New().String(),
 		TenantID:         tenantID,
+		FolderID:         folderID,
 		KnowledgeBaseID:  kbID,
 		Type:             "url",
 		Channel:          defaultChannel(channel),
@@ -525,8 +559,22 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	tagIDs []string,
 	channel string,
 	processOverrides *types.KnowledgeProcessOverrides,
+	folderID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file URL")
+	// Resolve target folder. The empty string is the KB root; a non-empty
+	// id must point at an existing folder so a typo in the request cannot
+	// file a document into a phantom directory.
+	folderID = strings.TrimSpace(folderID)
+	if folderID != types.KnowledgeFolderRootID && s.folderRepo != nil {
+		if _, folderErr := s.folderRepo.GetFolderByID(ctx, kbID, folderID); folderErr != nil {
+			if errors.Is(folderErr, interfaces.ErrKnowledgeFolderNotFound) {
+				return nil, werrors.NewNotFoundError("knowledge folder not found")
+			}
+			return nil, folderErr
+		}
+	}
+
 	logger.Infof(ctx, "Knowledge base ID: %s, file URL: %s", kbID, fileURL)
 
 	// Get knowledge base configuration
@@ -615,6 +663,7 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	knowledge := &types.Knowledge{
 		ID:               uuid.New().String(),
 		TenantID:         tenantID,
+		FolderID:         folderID,
 		KnowledgeBaseID:  kbID,
 		Type:             "file_url",
 		Channel:          defaultChannel(channel),
@@ -720,7 +769,7 @@ func (s *knowledgeService) CreateKnowledgeFromPassageSync(ctx context.Context,
 
 // CreateKnowledgeFromManual creates or saves manual Markdown knowledge content.
 func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
-	kbID string, payload *types.ManualKnowledgePayload, channel string,
+	kbID string, payload *types.ManualKnowledgePayload, channel string, folderID string,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating manual knowledge entry")
 
@@ -769,8 +818,24 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 	fileName := ensureManualFileName(title)
 	meta := types.NewManualKnowledgeMetadata(cleanContent, status, 1)
 
+
+	// Resolve target folder. The empty string is the KB root, which
+	// needs no validation; a non-empty id must point at an existing folder
+	// so a typo in the request cannot file a document into a phantom
+	// directory.
+	folderID = strings.TrimSpace(folderID)
+	if folderID != types.KnowledgeFolderRootID && s.folderRepo != nil {
+		if _, folderErr := s.folderRepo.GetFolderByID(ctx, kbID, folderID); folderErr != nil {
+			if errors.Is(folderErr, interfaces.ErrKnowledgeFolderNotFound) {
+				return nil, werrors.NewNotFoundError("knowledge folder not found")
+			}
+			return nil, folderErr
+		}
+	}
+
 	knowledge := &types.Knowledge{
 		TenantID:         tenantID,
+		FolderID:         folderID,
 		KnowledgeBaseID:  kbID,
 		Type:             types.KnowledgeTypeManual,
 		Channel:          defaultChannel(channel),

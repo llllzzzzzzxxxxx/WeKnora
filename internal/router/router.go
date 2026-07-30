@@ -86,6 +86,7 @@ type RouterParams struct {
 	DataSourceCredentialsHandler *handler.DataSourceCredentialsHandler
 	WeKnoraCloudHandler          *handler.WeKnoraCloudHandler
 	WikiPageHandler              *handler.WikiPageHandler
+	KnowledgeFolderHandler       *handler.KnowledgeFolderHandler
 }
 
 // NewRouter 创建新的路由
@@ -230,6 +231,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 		RegisterDataSourceRoutes(v1, params.DataSourceHandler, params.DataSourceCredentialsHandler, rbacGuards)
 		RegisterWeKnoraCloudRoutes(v1, params.WeKnoraCloudHandler, rbacGuards)
 		RegisterWikiPageRoutes(v1, params.WikiPageHandler, rbacGuards)
+		RegisterKnowledgeFolderRoutes(v1, params.KnowledgeFolderHandler, rbacGuards)
 		RegisterChunkerDebugRoutes(v1, rbacGuards)
 	}
 
@@ -1810,5 +1812,32 @@ func RegisterWikiPageRoutes(r *gin.RouterGroup, wikiHandler *handler.WikiPageHan
 		// Issues
 		wiki.GET("/issues", g.Viewer(), wikiHandler.ListIssues)
 		wiki.PUT("/issues/:issue_id/status", g.OwnedWikiKBOrAdmin(), wikiHandler.UpdateIssueStatus)
+	}
+}
+
+// RegisterKnowledgeFolderRoutes registers document knowledge base folder routes.
+//
+// Folders are scoped to document-type KBs only; FAQ and Wiki KBs are rejected
+// by the handler's resolveDocumentKB helper. All routes require at least
+// Viewer access to the owning KB, and mutations (create/update/delete/move)
+// require KB owner or Admin+.
+func RegisterKnowledgeFolderRoutes(r *gin.RouterGroup, folderHandler *handler.KnowledgeFolderHandler, g *rbacGuards) {
+	if folderHandler == nil {
+		return
+	}
+	folders := r.Group("/knowledge-bases/:kb_id/folders")
+	{
+		// Tree listing: full subtree for sidebar (Viewer+)
+		folders.GET("/tree", g.Viewer(), folderHandler.ListFolderTree)
+		// Direct children listing (Viewer+)
+		folders.GET("", g.Viewer(), folderHandler.ListChildFolders)
+		// Create folder (OwnedKBOrAdmin)
+		folders.POST("", g.OwnedKBOrAdmin(), folderHandler.CreateFolder)
+		// Rename or move folder (OwnedKBOrAdmin)
+		folders.PUT("/:folder_id", g.OwnedKBOrAdmin(), folderHandler.UpdateFolder)
+		// Delete folder (OwnedKBOrAdmin)
+		folders.DELETE("/:folder_id", g.OwnedKBOrAdmin(), folderHandler.DeleteFolder)
+		// Move documents into a folder (OwnedKBOrAdmin)
+		folders.POST("/move-knowledge", g.OwnedKBOrAdmin(), folderHandler.MoveKnowledgeToFolder)
 	}
 }

@@ -66,6 +66,8 @@ type knowledgeService struct {
 	memFAQRunningImport sync.Map // kbID -> *runningFAQImportInfo
 	wikiRepo            interfaces.WikiPageRepository
 	wikiService         interfaces.WikiPageService
+	folderRepo          interfaces.KnowledgeFolderRepository
+	folderService       interfaces.KnowledgeFolderService
 
 	// spanTracker records the per-attempt span tree for the parsing
 	// pipeline. Best-effort: a nil tracker (test harness) is safely
@@ -104,6 +106,8 @@ func NewKnowledgeService(
 	imageResolver *docparser.ImageResolver,
 	wikiRepo interfaces.WikiPageRepository,
 	wikiService interfaces.WikiPageService,
+	folderRepo interfaces.KnowledgeFolderRepository,
+	folderService interfaces.KnowledgeFolderService,
 	taskPendingRepo interfaces.TaskPendingOpsRepository,
 	spanTracker SpanTracker,
 ) (interfaces.KnowledgeService, error) {
@@ -130,6 +134,8 @@ func NewKnowledgeService(
 		imageResolver:   imageResolver,
 		wikiRepo:        wikiRepo,
 		wikiService:     wikiService,
+		folderRepo:      folderRepo,
+		folderService:   folderService,
 		taskPendingRepo: taskPendingRepo,
 		spanTracker:     spanTracker,
 	}, nil
@@ -915,4 +921,68 @@ func (s *knowledgeService) SearchKnowledgeForScopes(ctx context.Context, scopes 
 		return nil, false, 0, nil
 	}
 	return s.repo.SearchKnowledgeInScopes(ctx, scopes, keyword, offset, limit, fileTypes)
+}
+
+// MoveKnowledgeToFolder relocates a set of documents into a folder inside
+// the same KB. The service does the "every ID belongs to this KB" check in
+// one batched fetch so a misbehaving client cannot smuggle cross-KB IDs
+// into folder_id. Returns the IDs that were actually moved (i.e. that
+// belonged to the KB) so the handler can clear exactly those rows from
+// the UI's current view.
+func (s *knowledgeService) MoveKnowledgeToFolder(
+	ctx context.Context, tenantID uint64, kbID string, knowledgeIDs []string, folderID string,
+) ([]string, error) {
+	if len(knowledgeIDs) == 0 {
+		return nil, werrors.NewBadRequestError("knowledge_ids cannot be empty")
+	}
+	folderID = strings.TrimSpace(folderID)
+	if folderID != types.KnowledgeFolderRootID && s.folderRepo != nil {
+		if _, err := s.folderRepo.GetFolderByID(ctx, kbID, folderID); err != nil {
+			if errors.Is(err, interfaces.ErrKnowledgeFolderNotFound) {
+				return nil, werrors.NewNotFoundError("knowledge folder not found")
+			}
+			return nil, err
+		}
+	}
+	existing, err := s.repo.GetKnowledgeBatch(ctx, tenantID, knowledgeIDs)
+	if err != nil {
+		return nil, err
+	}
+	acknowledged := make([]string, 0, len(existing))
+	for _, k := range existing {
+		if k != nil && k.KnowledgeBaseID == kbID {
+			acknowledged = append(acknowledged, k.ID)
+		}
+	}
+	if len(acknowledged) == 0 {
+		return nil, werrors.NewBadRequestError("no knowledge entries were found in the target knowledge base")
+	}
+	if _, err := s.repo.UpdateKnowledgeFolderIDBatch(ctx, tenantID, kbID, acknowledged, folderID); err != nil {
+		return nil, err
+	}
+	return acknowledged, nil
+}
+
+// ResolveFolderKnowledgeIDs expands a folder pick into a deduplicated list
+// of knowledge IDs that fall inside the picked folders and (optionally)
+// their descendants. The companion to KnowledgeFolderService.ResolveFolderIDs
+// — the handler does not have to fan out into two services.
+func (s *knowledgeService) ResolveFolderKnowledgeIDs(
+	ctx context.Context, tenantID uint64, kbID string, folderScope *types.FolderScopeQuery,
+) ([]string, error) {
+	if folderScope == nil || len(folderScope.FolderIDs) == 0 {
+		return nil, nil
+	}
+	if s.folderRepo == nil {
+		return nil, nil
+	}
+	folderIDs := folderScope.FolderIDs
+	if folderScope.IncludeDescendants {
+		expanded, err := s.folderRepo.ListDescendantFolderIDs(ctx, kbID, folderIDs)
+		if err != nil {
+			return nil, err
+		}
+		folderIDs = expanded
+	}
+	return s.repo.ListKnowledgeIDsByFolderIDs(ctx, tenantID, kbID, folderIDs)
 }
