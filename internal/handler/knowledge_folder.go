@@ -43,7 +43,7 @@ func NewKnowledgeFolderHandler(
 // document-type knowledge base. FAQ and Wiki KBs are rejected with 400.
 func (h *KnowledgeFolderHandler) resolveDocumentKB(c *gin.Context) (string, uint64, error) {
 	ctx := c.Request.Context()
-	kbID := secutils.SanitizeForLog(c.Param("kb_id"))
+	kbID := secutils.SanitizeForLog(c.Param("id"))
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 
 	if kbID == "" {

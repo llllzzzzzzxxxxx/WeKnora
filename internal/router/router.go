@@ -1825,7 +1825,7 @@ func RegisterKnowledgeFolderRoutes(r *gin.RouterGroup, folderHandler *handler.Kn
 	if folderHandler == nil {
 		return
 	}
-	folders := r.Group("/knowledge-bases/:kb_id/folders")
+	folders := r.Group("/knowledge-bases/:id/folders")
 	{
 		// Tree listing: full subtree for sidebar (Viewer+)
 		folders.GET("/tree", g.Viewer(), folderHandler.ListFolderTree)

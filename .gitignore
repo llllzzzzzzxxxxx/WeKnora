@@ -55,5 +55,8 @@ Claude.md
 configure-ollama.sh
 fix-docker.sh
 
+# E2E test screenshots (kept locally, not for PR)
+screenshots/
+
 # WeChat Mini Program local/private configuration
 miniprogram/project.private.config.json

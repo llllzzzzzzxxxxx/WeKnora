@@ -114,6 +114,7 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 		Name:        fmt.Sprintf("%s's Workspace", secutils.SanitizeForLog(req.Username)),
 		Description: "Default workspace",
 		Status:      "active",
+		Business:    "default",
 	}
 
 	createdTenant, err := s.tenantService.CreateTenant(ctx, tenant)
